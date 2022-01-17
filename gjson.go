@@ -3,6 +3,8 @@ package gjson
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -780,6 +782,7 @@ func parseArrayPath(path string) (r arrayPathResult) {
 			}
 			return
 		}
+
 		if path[i] == '#' {
 			r.arrch = true
 			if i == 0 && len(path) > 1 {
@@ -943,9 +946,11 @@ type objectPathResult struct {
 	piped bool
 	wild  bool
 	more  bool
+	regex bool
 }
 
 func parseObjectPath(path string) (r objectPathResult) {
+	var regexBegin = false
 	for i := 0; i < len(path); i++ {
 		if path[i] == '|' {
 			r.part = path[:i]
@@ -953,7 +958,7 @@ func parseObjectPath(path string) (r objectPathResult) {
 			r.piped = true
 			return
 		}
-		if path[i] == '.' {
+		if path[i] == '.' && !regexBegin {
 			r.part = path[:i]
 			if i < len(path)-1 && isDotPiperChar(path[i+1]) {
 				r.pipe = path[i+1:]
@@ -968,7 +973,17 @@ func parseObjectPath(path string) (r objectPathResult) {
 			r.wild = true
 			continue
 		}
-		if path[i] == '\\' {
+		if path[i] == '~' {
+
+			if !regexBegin {
+				regexBegin = true
+			} else {
+				r.regex = true
+				regexBegin = false
+			}
+			continue
+		}
+		if path[i] == '\\' && !regexBegin {
 			// go into escape mode. this is a slower path that
 			// strips off the escape character from the part.
 			epart := []byte(path[:i])
@@ -1072,6 +1087,7 @@ func parseObject(c *parseContext, i int, path string) (int, bool) {
 	for i < len(c.json) {
 		for ; i < len(c.json); i++ {
 			if c.json[i] == '"' {
+				fmt.Printf("%s", string(c.json[i]))
 				// parse_key_string
 				// this is slightly different from getting s string value
 				// because we don't need the outer quotes.
@@ -1123,17 +1139,34 @@ func parseObject(c *parseContext, i int, path string) (int, bool) {
 		if !ok {
 			return i, false
 		}
-		if rp.wild {
+
+		key = strings.SplitN(key, "/", 3)[1]
+
+		if rp.regex {
 			if kesc {
-				pmatch = matchLimit(unescape(key), rp.part)
+				pmatch = matchRegex(unescape(key), rp.part)
 			} else {
-				pmatch = matchLimit(key, rp.part)
+				pmatch = matchRegex(key, rp.part)
 			}
 		} else {
-			if kesc {
-				pmatch = rp.part == unescape(key)
+			if rp.wild {
+				if kesc {
+					pmatch = matchLimit(unescape(key), rp.part)
+				} else {
+					pmatch = matchLimit(key, rp.part)
+				}
 			} else {
-				pmatch = rp.part == key
+				if kesc {
+					pmatch = rp.part == unescape(key)
+				} else {
+					// If key is enclosed with "~"
+					// then match the key with regular expression
+					if matchRegex2(key, "~(.*?)~") {
+						pmatch = matchRegex(rp.part, key)
+					} else {
+						pmatch = rp.part == key
+					}
+				}
 			}
 		}
 		hit = pmatch && !rp.more
@@ -1230,6 +1263,26 @@ func parseObject(c *parseContext, i int, path string) (int, bool) {
 func matchLimit(str, pattern string) bool {
 	matched, _ := match.MatchLimit(str, pattern, 10000)
 	return matched
+}
+
+func matchRegex(str, pattern string) bool {
+	// Remove the pattern enclosed character "~"
+	match, err := regexp.MatchString(strings.Trim(pattern, "~"), str)
+	if err != nil {
+		fmt.Printf("%v", err)
+		return false
+	}
+	return match
+}
+
+func matchRegex2(str, pattern string) bool {
+	// Remove the pattern enclosed character "~"
+	match, err := regexp.MatchString(pattern, str)
+	if err != nil {
+		fmt.Printf("%v", err)
+		return false
+	}
+	return match
 }
 
 func queryMatches(rp *arrayPathResult, value Result) bool {
@@ -2669,8 +2722,6 @@ var modifiers = map[string]func(json, arg string) string{
 	"valid":   modValid,
 	"keys":    modKeys,
 	"values":  modValues,
-	"tostr":   modToStr,
-	"fromstr": modFromStr,
 }
 
 // AddModifier binds a custom modifier command to the GJSON syntax.
@@ -2954,22 +3005,6 @@ func modValid(json, arg string) string {
 		return ""
 	}
 	return json
-}
-
-// @fromstr converts a string to json
-//   "{\"id\":1023,\"name\":\"alert\"}" -> {"id":1023,"name":"alert"}
-func modFromStr(json, arg string) string {
-	if !Valid(json) {
-		return ""
-	}
-	return Parse(json).String()
-}
-
-// @tostr converts a string to json
-//   {"id":1023,"name":"alert"} -> "{\"id\":1023,\"name\":\"alert\"}"
-func modToStr(str, arg string) string {
-	data, _ := json.Marshal(str)
-	return string(data)
 }
 
 // stringHeader instead of reflect.StringHeader
